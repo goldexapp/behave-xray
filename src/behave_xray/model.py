@@ -9,8 +9,8 @@ class XrayStatus(str, enum.Enum):
     TODO = 'TODO'
     EXECUTING = 'EXECUTING'
     PENDING = 'PENDING'
-    PASS = 'PASS'
-    FAIL = 'FAIL'
+    PASS = 'PASSED'
+    FAIL = 'FAILED'
     ABORTED = 'ABORTED'
     BLOCKED = 'BLOCKED'
 
@@ -21,20 +21,16 @@ class TestCase:
                  test_key: str = None,
                  status: str = XrayStatus.TODO,
                  comment: str = None,
-                 examples: list = None,
-                 duration: float = 0.0,
-                 is_outline: bool = False):
+                 duration: float = 0.0):
         self.test_key = test_key
         self.status = XrayStatus(status)
         self.comment = comment or ''
-        self.examples = examples or []
         self.duration = duration
 
     def as_dict(self) -> Dict[str, str]:
         return dict(testKey=self.test_key,
-                    status=self.status.name,
-                    comment=self.comment,
-                    examples=[str(example) for example in self.examples])
+                    status=self.status,
+                    comment=self.comment)
 
     def __repr__(self):
         return f"{self.__class__.__name__}(test_key='{self.test_key}', status='{self.status}')"
