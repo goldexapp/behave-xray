@@ -31,11 +31,10 @@ Feature: showing off behave
       Then behave will test it for us!
 ```
 
-Set system environments (Basic authentication):
+Set system environments (Basic authentication): For Cloud Xray app only
 ```shell
-export XRAY_API_BASE_URL=<jira URL>
-export XRAY_API_USER=<jria username>
-export XRAY_API_PASSWORD=<user password>
+export client_id=<client_id>
+export client_secret=<client_secret>
 ```
 
 Run tests:
