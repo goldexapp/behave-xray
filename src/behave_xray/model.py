@@ -1,71 +1,100 @@
-import datetime as dt
-import enum
-from typing import Dict, List, Union, Any
 
-DATETIME_FORMAT = '%Y-%m-%dT%H:%M:%S%z'
+import re
+from collections import defaultdict
+from os import environ
 
-
-class XrayStatus(str, enum.Enum):
-    TODO = 'TODO'
-    EXECUTING = 'EXECUTING'
-    PENDING = 'PENDING'
-    PASS = 'PASSED'
-    FAIL = 'FAILED'
-    ABORTED = 'ABORTED'
-    BLOCKED = 'BLOCKED'
+from behave.formatter.base import Formatter
+from behave.model import Status as ScenarioStatus
+from behave_xray.model import XrayStatus, TestCase, TestExecution
+from behave_xray.xray_publisher import XrayPublisher
 
 
-class TestCase:
+def get_test_execution_tag(tag):
+    match = re.match(r"^jira\.test_?execution\('(.+)'\)$", tag, flags=re.IGNORECASE)
+    if match:
+        return match.group(1)
+    else:
+        return None
 
-    def __init__(self,
-                 test_key: str = None,
-                 status: str = XrayStatus.TODO,
-                 comment: str = None,
-                 duration: float = 0.0):
-        self.test_key = test_key
-        self.status = XrayStatus(status)
-        self.comment = comment or ''
-        self.duration = duration
 
-    def as_dict(self) -> Dict[str, str]:
-        return dict(testKey=self.test_key,
-                    status=self.status,
-                    comment=self.comment)
+def get_test_plan_tag(tag):
+    match = re.match(r"^jira\.test_?plan\('(.+)'\)$", tag, flags=re.IGNORECASE)
+    if match:
+        return match.group(1)
+    else:
+        return None
+
+
+def get_test_case_tag(tag):
+    match = re.match(r"^(allure|jira)\.test_?case\(['\"](.+)['\"]\)$", tag, flags=re.IGNORECASE)
+    if match:
+        return match.group(2)
+    # for outline scenario
+    match = re.match(r"^(allure|jira)\.test_?case(.+)$", tag, flags=re.IGNORECASE)
+    if match:
+        return match.group(2)
+    else:
+        return None
+
+
+class XrayFormatter(Formatter):
+    description = 'Jira XRAY formatter'
+
+    def __init__(self, stream, config):
+        super().__init__(stream, config)
+        self._scenario_keys = defaultdict(lambda: TestCase())
+        self.current_feature = None
+        self.current_scenario = None
+        self.test_execution = TestExecution()
+        self.xray_publisher = XrayPublisher()
+
 
     def __repr__(self):
-        return f"{self.__class__.__name__}(test_key='{self.test_key}', status='{self.status}')"
+        return f'{self.__class__.__name__}()'
 
-class TestExecution:
+    def feature(self, feature):
+        self.current_feature = feature
+        if feature.tags:
+            for tag in feature.tags:
+                te = get_test_execution_tag(tag)
+                if te:
+                    self.test_execution.test_execution_key = te
+                tp = get_test_plan_tag(tag)
+                if tp:
+                    self.test_execution.test_plan_key = tp
 
-    def __init__(self,
-                 test_execution_key: str = None,
-                 test_plan_key: str = None,
-                 user: str = None,
-                 revision: str = None,
-                 tests: List = None):
-        self.test_execution_key = test_execution_key
-        self.test_plan_key = test_plan_key or ''
-        self.user = user or ''
-        self.revision = revision or ''
-        self.start_date = dt.datetime.now(tz=dt.timezone.utc)
-        self.tests = tests or []
+    def scenario(self, scenario):
+        self.current_scenario = scenario
+        if scenario.tags:
+            for tag in scenario.tags:
+                tk = get_test_case_tag(tag)
+                if tk:
+                    self._scenario_keys[scenario].test_key = tk
 
-    def append(self, test: Union[dict, TestCase]) -> None:
-        if not isinstance(test, TestCase):
-            test = TestCase(**test)
-        self.tests.append(test)
+    def result(self, result):
+        if self.current_scenario.status == ScenarioStatus.untested:
+            return
 
-    def flush(self):
-        self.tests = []
+        self._scenario_keys[self.current_scenario].duration = result.duration
 
-    def as_dict(self) -> Dict[str, Any]:
-        tests = [test.as_dict() for test in self.tests]
-        info = dict(startDate=self.start_date.strftime(DATETIME_FORMAT),
-                    finishDate=dt.datetime.now(tz=dt.timezone.utc).strftime(DATETIME_FORMAT))
-        data = dict(info=info,
-                    tests=tests)
-        if self.test_plan_key:
-            info['testPlanKey'] = self.test_plan_key
-        if self.test_execution_key:
-            data['testExecutionKey'] = self.test_execution_key
-        return data
+        if self.current_scenario.status == ScenarioStatus.passed:
+            self._scenario_keys[self.current_scenario].status = XrayStatus.PASS
+        if result.status == ScenarioStatus.failed:
+            self._scenario_keys[self.current_scenario].status = XrayStatus.FAIL
+            self._scenario_keys[self.current_scenario].comment = result.error_message
+        if result.status == ScenarioStatus.untested:
+            self._scenario_keys[self.current_scenario].status = XrayStatus.TODO
+        if result.status == ScenarioStatus.skipped:
+            self._scenario_keys[self.current_scenario].status = XrayStatus.ABORTED
+            self._scenario_keys[self.current_scenario].comment = self.current_scenario.skip_reason
+
+    def eof(self):
+        if self.config.dry_run:
+            return
+        while self._scenario_keys:
+            _, xray = self._scenario_keys.popitem()
+            if xray.test_key:
+                self.test_execution.append(xray)
+        if self.test_execution.tests:
+            self.xray_publisher.publish(self.test_execution)
+        self.test_execution.flush()
