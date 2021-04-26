@@ -1,17 +1,14 @@
 import json
-import logging
 from typing import Union
+import logging
 
 import requests
-from behave_xray.model import TestExecution
 from requests.auth import AuthBase
+from behave_xray.model import TestExecution
+from os import environ
 
-TEST_EXEXUTION_ENDPOINT = '/rest/raven/2.0/import/execution'
-
-logging.basicConfig()
-_logger = logging.getLogger(__name__)
-_logger.setLevel(logging.INFO)
-
+TEST_EXECUTION_ENDPOINT = 'https://xray.cloud.xpand-it.com/api/v2/import/execution'
+AUTHENTICATION_URL = 'https://xray.cloud.xpand-it.com/api/v2/authenticate'
 
 class XrayError(Exception):
     """Custom exception for Jira XRAY"""
@@ -19,41 +16,75 @@ class XrayError(Exception):
 
 class XrayPublisher:
 
-    def __init__(self, base_url: str, auth: Union[AuthBase, tuple]) -> None:
-        if base_url.endswith('/'):
-            base_url = base_url[:-1]
-        self.base_url = base_url
-        self.auth = auth
-
     @property
     def endpoint_url(self) -> str:
-        return self.base_url + TEST_EXEXUTION_ENDPOINT
+        return TEST_EXECUTION_ENDPOINT
+    @property
+    def authentication_url(self) -> str:
+        return AUTHENTICATION_URL
 
-    def publish_xray_results(self, url: str, auth: AuthBase, data: dict) -> dict:
+    def parser(self, data):
+        test_key_list = []
+        test_keys = [test['testKey'] for test in data]
+        print(test_keys)
+        key_exist = []
+        for tests in data:
+            if test_keys.count(tests['testKey']) <= 1:
+                test_key_list.append(tests)
+            elif test_keys.count(tests['testKey']) > 1 and tests['testKey'] not in key_exist:
+                key_exist.append(tests['testKey'])
+                examples = []
+                test_dict = dict()
+                test_dict['testKey'] = tests['testKey']
+                test_dict['comment'] = tests['comment']
+                failed_comments = ''
+                scenario_no = test_keys.count(tests['testKey'])
+                for test in data:
+                    if tests['testKey'] == test['testKey']:
+                        examples.append(test['status'])
+                        test_dict['examples'] = examples
+                        if test['status'] == 'FAILED':
+                            failed_comments += '\n----------\n'
+                            failed_comments += 'Scenario no. ' + str(scenario_no) + ' ------ ' + test['testKey']
+                            failed_comments += '\n----------\n'
+                            failed_comments += test['comment']
+                            test_dict['comment'] = failed_comments
+                        scenario_no = scenario_no - 1
+                test_dict['status'] = 'PASSED' if all(elem == 'PASSED' for elem in examples) else 'FAILED'
+                test_dict['examples'].reverse()
+                test_key_list.append(test_dict)
+        return test_key_list
+
+    def publish_data(self, auth: AuthBase, data: dict) -> dict:
+
         headers = {'Accept': 'application/json',
-                   'Content-Type': 'application/json'}
+                   'Content-Type': 'application/json'
+                   }
+        auth_param ={ "client_id": environ["client_id"],"client_secret": environ["client_secret"] }
+        auth_param = json.dumps(auth_param)
+        token = requests.request(method='POST',url=self.authentication_url, headers=headers, data =auth_param)
+        token = token.text.strip('"')
+        token = "Bearer " + token
+        data1 = json.dumps(data)
+        data2= json.loads(data1)
+        data['tests']=self.parser(data=data2['tests'])
+        headers = {'Accept': 'application/json',
+                   'Content-Type': 'application/json',
+                   'Authorization': token
+                   }
+        response = requests.request(method='POST', url=self.endpoint_url, headers=headers, data=json.dumps(data))
         try:
-            response = requests.request(method='POST', url=url, headers=headers, json=data, auth=auth)
-        except requests.exceptions.ConnectionError as e:
-            _logger.exception('ConnectionError to JIRA service %s', self.base_url)
+            response.raise_for_status()
+        except Exception as e:
             raise XrayError(e)
-        else:
-            try:
-                response.raise_for_status()
-            except Exception as e:
-                _logger.error('Could not post to JIRA service %s. Response status code: %s',
-                              self.base_url, response.status_code)
-                _logger.error('Response error: %s', response.json())
-                raise XrayError from e
-            return response.json()
+        return response.json()
 
-    def publish(self, test_execution: TestExecution) -> bool:
+    def publish(self, test_execution: TestExecution) -> None:
         try:
-            result = self.publish_xray_results(self.endpoint_url, self.auth, test_execution.as_dict())
-        except XrayError:
-            _logger.error('Could not publish results to Jira XRAY')
-            return False
+            result = self.publish_data(self.endpoint_url, test_execution.as_dict())
+        except XrayError as e:
+            print('Could not publish to Jira:', e)
         else:
-            key = result['testExecIssue']['key']
-            print('Uploaded results to JIRA XRAY Test Execution:', key)
-            return True
+            key = result['key']
+            print('Uploaded results to XRAY Test Execution:', key)
+
